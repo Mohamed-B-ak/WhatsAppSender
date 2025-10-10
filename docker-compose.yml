@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  whatsapp-bulk-sender:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: whatsapp_bulk_sender
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=UTC
+    volumes:
+      # Mount for development (optional - remove in production)
+      - ./main.py:/app/main.py
+      - ./whatsapp_client_python:/app/whatsapp_client_python
+      # Volume for logs (optional)
+      - ./logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - whatsapp-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  whatsapp-network:
+    driver: bridge
+
+# Optional: Add volume for persistent data
+volumes:
+  whatsapp-data:

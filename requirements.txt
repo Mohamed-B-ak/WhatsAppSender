@@ -1,0 +1,20 @@
+# FastAPI framework and server
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# Async HTTP client for WhatsApp client
+aiohttp==3.9.3
+aiofiles==23.2.1
+
+# Synchronous HTTP for fallback
+requests==2.31.0
+
+# Data validation
+pydantic==2.5.3
+
+# CSV processing (built-in csv module is used, but we can add pandas for advanced features)
+pandas==2.1.4
+
+# Additional utilities
+python-dotenv==1.0.0
