@@ -459,7 +459,7 @@ async def send_bulk_messages(
         recipients = []
         for row_num, row in enumerate(csv_reader, start=2):  # Start at 2 (header is line 1)
             if 'name' in row and 'phone' in row:
-                name = row['name'].strip() if row['name'] else ""
+                name = row['name'].strip() if row['name'] else " "  # Use a space if the name is empty
                 phone = row['phone'].strip() if row['phone'] else ""
                 
                 if name and phone:
