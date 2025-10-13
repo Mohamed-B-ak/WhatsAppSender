@@ -473,11 +473,9 @@ async def send_bulk_messages(
                         })
                     else:
                         print(f"Skipping row {row_num}: missing name or phone")
-            except:
-                print("error col")
-        
-            except
-        
+            except Exception as e:
+                print(f"Error processing row {row_num}: {str(e)}")
+                continue
         if not recipients:
             raise HTTPException(status_code=400, detail="No valid recipients found in CSV. Make sure CSV has 'name' and 'phone' columns with data.")
         
