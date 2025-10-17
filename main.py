@@ -458,20 +458,40 @@ async def send_bulk_messages(
         
         recipients = []
         for row_num, row in enumerate(csv_reader, start=2):  # Start at 2 (header is line 1)
-            if 'name' in row and 'phone' in row:
-                name = row['name'].strip() if row['name'] else ""
-                phone = row['phone'].strip() if row['phone'] else ""
-                
-                if name and phone:
-                    # Replace [الاسم] placeholder with actual name
-                    personalized_message = message.replace('[الاسم]', name)
-                    recipients.append({
-                        'phone': phone,
-                        'message': personalized_message,
-                        'name': name
-                    })
-                else:
-                    print(f"Skipping row {row_num}: missing name or phone")
+            try:
+                if 'name' in row and 'phone' in row:
+                    name = row['name'].strip() if row['name'] else " "  # Use a space if the name is empty
+                    phone = row['phone'].strip() if row['phone'] else ""
+                    
+                    if name and phone:
+                        # Replace [الاسم] placeholder with actual name
+                        personalized_message = message.replace('[الاسم]', name)
+                        import random
+                        text_list = [
+                                    "حيّاك الله",
+                                    "السلام عليكم و رحمة الله و بركاته",
+                                    "يسعد أوقاتك",
+                                    "تحية طيبة",
+                                    "يعطيك العافية",
+                                    "يسعد أيامك",
+                                    "حيّاك الله",
+                                    "يا هلا",
+                                    "أهلًا",
+                                    "السلام عليكم"
+                                ]
+
+                        random_text = random.choice(text_list)
+                        final_personalized_message = personalized_message.replace('[التحية]', random_text)
+                        recipients.append({
+                            'phone': phone,
+                            'message': final_personalized_message,
+                            'name': name
+                        })
+                    else:
+                        print(f"Skipping row {row_num}: missing name or phone")
+            except Exception as e:
+                print(f"Error processing row {row_num}: {str(e)}")
+                continue
         
         if not recipients:
             raise HTTPException(status_code=400, detail="No valid recipients found in CSV. Make sure CSV has 'name' and 'phone' columns with data.")
