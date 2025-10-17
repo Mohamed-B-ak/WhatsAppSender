@@ -7,7 +7,7 @@ import asyncio
 import csv
 import io
 from typing import List, Dict
-import aiofiles
+
 from pydantic import BaseModel
 import sys
 import os
@@ -458,24 +458,21 @@ async def send_bulk_messages(
         
         recipients = []
         for row_num, row in enumerate(csv_reader, start=2):  # Start at 2 (header is line 1)
-            try:
-                if 'name' in row and 'phone' in row:
-                    name = row['name'].strip() if row['name'] else " "  # Use a space if the name is empty
-                    phone = row['phone'].strip() if row['phone'] else ""
-                    
-                    if name and phone:
-                        # Replace [الاسم] placeholder with actual name
-                        personalized_message = message.replace('[الاسم]', name)
-                        recipients.append({
-                            'phone': phone,
-                            'message': personalized_message,
-                            'name': name
-                        })
-                    else:
-                        print(f"Skipping row {row_num}: missing name or phone")
-            except Exception as e:
-                print(f"Error processing row {row_num}: {str(e)}")
-                continue
+            if 'name' in row and 'phone' in row:
+                name = row['name'].strip() if row['name'] else ""
+                phone = row['phone'].strip() if row['phone'] else ""
+                
+                if name and phone:
+                    # Replace [الاسم] placeholder with actual name
+                    personalized_message = message.replace('[الاسم]', name)
+                    recipients.append({
+                        'phone': phone,
+                        'message': personalized_message,
+                        'name': name
+                    })
+                else:
+                    print(f"Skipping row {row_num}: missing name or phone")
+        
         if not recipients:
             raise HTTPException(status_code=400, detail="No valid recipients found in CSV. Make sure CSV has 'name' and 'phone' columns with data.")
         
@@ -499,24 +496,27 @@ async def send_bulk_messages(
                     print(f"Sending message {idx}/{len(recipients)} to {recipient['phone']} ({recipient['name']})")
                     
                     # Using synchronous send_message as per the client implementation
-                    success = client.send_message(recipient['phone'], recipient['message'])
-                    
-                    if success:
-                        results["sent"] += 1
-                        results["details"].append({
-                            "phone": recipient['phone'],
-                            "name": recipient['name'],
-                            "status": "✅ sent"
-                        })
-                        print(f"✅ Successfully sent to {recipient['phone']}")
-                    else:
-                        results["failed"] += 1
-                        results["details"].append({
-                            "phone": recipient['phone'],
-                            "name": recipient['name'],
-                            "status": "❌ failed"
-                        })
-                        print(f"❌ Failed to send to {recipient['phone']}")
+                    try: 
+                        success = client.send_message(recipient['phone'], recipient['message'])
+                        
+                        if success:
+                            results["sent"] += 1
+                            results["details"].append({
+                                "phone": recipient['phone'],
+                                "name": recipient['name'],
+                                "status": "✅ sent"
+                            })
+                            print(f"✅ Successfully sent to {recipient['phone']}")
+                        else:
+                            results["failed"] += 1
+                            results["details"].append({
+                                "phone": recipient['phone'],
+                                "name": recipient['name'],
+                                "status": "❌ failed"
+                            })
+                            print(f"❌ Failed to send to {recipient['phone']}")
+                    except:
+                        print("can't send")
                     
                     # Add delay between messages to avoid rate limiting
                     if idx < len(recipients):  # Don't delay after the last message
