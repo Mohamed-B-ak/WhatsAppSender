@@ -7,7 +7,10 @@ import asyncio
 import csv
 import io
 from typing import List, Dict
-
+import smtplib
+import pandas as pd
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from pydantic import BaseModel
 import sys
 import os
@@ -479,9 +482,31 @@ async def send_bulk_messages(
                                     "أهلًا",
                                     "السلام عليكم"
                                 ]
+                        name_list = ["نور",
+                                    "سارة",
+                                    "ريم",
+                                    "هدى",
+                                    "فاطمة",
+                                    "مريم",
+                                    "جواهر",
+                                    "شهد",
+                                    "دلال",
+                                    "نورة",
+                                    "أروى",
+                                    "ضحى",
+                                    "رغد",
+                                    "سمية",
+                                    "لمى",
+                                    "غادة",
+                                    "جنان",
+                                    "ليان",
+                                    "سلمى",
+                                    "زينب"]
 
                         random_text = random.choice(text_list)
                         final_personalized_message = personalized_message.replace('[التحية]', random_text)
+                        random_name = random.choice(name_list)
+                        final_personalized_message = personalized_message.replace('[فريق]', random_name)
                         recipients.append({
                             'phone': phone,
                             'message': final_personalized_message,
@@ -560,6 +585,158 @@ async def send_bulk_messages(
     except Exception as e:
         print(f"Error in send_bulk_messages: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# -------------------------------
+# ✉️ EMAIL INTERFACE
+# -------------------------------
+@app.get("/email", response_class=HTMLResponse)
+async def get_email_interface():
+    """HTML form for sending bulk emails"""
+    return """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>📧 Bulk Email Sender</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                background: linear-gradient(135deg, #36D1DC 0%, #5B86E5 100%);
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                min-height: 100vh;
+            }
+            .container {
+                background: white;
+                padding: 40px;
+                border-radius: 15px;
+                width: 100%;
+                max-width: 600px;
+                box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            }
+            h1 { text-align: center; margin-bottom: 20px; }
+            input, textarea {
+                width: 100%;
+                margin-bottom: 15px;
+                padding: 10px;
+                border: 2px solid #ddd;
+                border-radius: 8px;
+                font-size: 14px;
+            }
+            button {
+                width: 100%;
+                background: #5B86E5;
+                color: white;
+                border: none;
+                padding: 12px;
+                border-radius: 8px;
+                font-size: 16px;
+                cursor: pointer;
+            }
+            button:hover {
+                background: #36D1DC;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>📧 Bulk Email Sender</h1>
+            <form id="emailForm">
+                <input type="text" name="sender_email" placeholder="Your Gmail address" required>
+                <input type="password" name="app_password" placeholder="Your App Password" required>
+                <input type="text" name="subject" placeholder="Email Subject" required>
+                <textarea name="body" placeholder="Message body. Use [name] for personalization" required></textarea>
+                <input type="file" name="file" accept=".csv" required>
+                <button type="submit">🚀 Send Emails</button>
+            </form>
+            <div id="result" style="margin-top:20px;"></div>
+
+            <script>
+                const form = document.getElementById('emailForm');
+                form.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const formData = new FormData(form);
+                    const result = document.getElementById('result');
+                    result.textContent = '⏳ Sending... Please wait.';
+
+                    const response = await fetch('/send-email', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    const data = await response.json();
+                    if (response.ok) {
+                        result.innerHTML = `<b>✅ Sent:</b> ${data.sent} | <b>❌ Failed:</b> ${data.failed} | Total: ${data.total}`;
+                    } else {
+                        result.innerHTML = `❌ Error: ${data.detail}`;
+                    }
+                });
+            </script>
+        </div>
+    </body>
+    </html>
+    """
+
+# -------------------------------
+# ✉️ EMAIL ENDPOINT
+# -------------------------------
+@app.post("/send-email")
+async def send_bulk_emails(
+    sender_email: str = Form(...),
+    app_password: str = Form(...),
+    subject: str = Form(...),
+    body: str = Form(...),
+    file: UploadFile = File(...)
+):
+    """
+    Send personalized bulk emails from a CSV file.
+    CSV columns required: name, email
+    """
+    try:
+        if not file.filename.endswith('.csv'):
+            raise HTTPException(status_code=400, detail="File must be a CSV file")
+
+        contents = await file.read()
+        try:
+            csv_text = contents.decode('utf-8')
+        except UnicodeDecodeError:
+            csv_text = contents.decode('latin-1')
+
+        reader = csv.DictReader(io.StringIO(csv_text))
+        if 'email' not in reader.fieldnames or 'name' not in reader.fieldnames:
+            raise HTTPException(status_code=400, detail="CSV must have 'name' and 'email' columns")
+
+        recipients = [r for r in reader if r.get('email')]
+
+        # Connect to Gmail SMTP
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(sender_email, app_password)
+
+        results = {"sent": 0, "failed": 0, "total": len(recipients), "details": []}
+
+        for r in recipients:
+            try:
+                personalized_body = body.replace('[name]', r['name'])
+                msg = MIMEMultipart()
+                msg["From"] = sender_email
+                msg["To"] = r['email']
+                msg["Subject"] = subject
+                msg.attach(MIMEText(personalized_body, "plain"))
+                server.send_message(msg)
+                results["sent"] += 1
+                results["details"].append({"email": r['email'], "name": r['name'], "status": "✅ Sent"})
+                await asyncio.sleep(1)
+            except Exception as e:
+                results["failed"] += 1
+                results["details"].append({"email": r['email'], "error": str(e)})
+
+        server.quit()
+        return JSONResponse(content=results)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/health")
 async def health_check():
