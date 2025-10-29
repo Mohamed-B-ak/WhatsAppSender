@@ -504,9 +504,9 @@ async def send_bulk_messages(
                                     "زينب"]
 
                         random_text = random.choice(text_list)
-                        final_personalized_message = personalized_message.replace('[التحية]', random_text)
+                        version1 = personalized_message.replace('[التحية]', random_text)
                         random_name = random.choice(name_list)
-                        final_personalized_message = personalized_message.replace('[فريق]', random_name)
+                        final_personalized_message = version1.replace('[فريق]', random_name)
                         recipients.append({
                             'phone': phone,
                             'message': final_personalized_message,
