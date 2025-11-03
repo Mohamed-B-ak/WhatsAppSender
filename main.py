@@ -463,8 +463,31 @@ async def send_bulk_messages(
         for row_num, row in enumerate(csv_reader, start=2):  # Start at 2 (header is line 1)
             try:
                 if 'name' in row and 'phone' in row:
-                    name = row['name'].strip() if row['name'] else " "  # Use a space if the name is empty
+                    name = row['name'].strip() if row['name'] else " "
                     phone = row['phone'].strip() if row['phone'] else ""
+
+                    if phone:
+                        # Remove common symbols
+                        phone = phone.replace(" ", "").replace("-", "").replace("+", "")
+
+                        # Remove international prefix 00966 -> replace with nothing
+                        if phone.startswith("00966"):
+                            phone = phone[5:]
+
+                        # Remove leading zero (e.g. 055...)
+                        if phone.startswith("0"):
+                            phone = phone[1:]
+
+                        # If phone does not start with 966, add it
+                        if not phone.startswith("966"):
+                            phone = "966" + phone
+
+                        # Length check (966 + 9 digits = 12)
+                        if len(phone) != 12 or not phone.isdigit():
+                            print(f"❌ Invalid Saudi number: {row['phone']} -> {phone}")
+                            phone = ""  # Clear invalid number
+                        else:
+                            print(f"✅ Valid Saudi number: {phone}")
                     
                     if name and phone:
                         # Replace [الاسم] placeholder with actual name
