@@ -530,9 +530,10 @@ async def send_bulk_messages(
                         version1 = personalized_message.replace('[التحية]', random_text)
                         random_name = random.choice(name_list)
                         final_personalized_message = version1.replace('[فريق]', random_name)
+                        rtl_message = f"\u202B{final_personalized_message}\u202C"
                         recipients.append({
                             'phone': phone,
-                            'message': final_personalized_message,
+                            'message': rtl_message,
                             'name': name
                         })
                     else:
