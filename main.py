@@ -421,6 +421,37 @@ async def get_interface():
 </body>
 </html>
     """
+@app.post("/send-whatsApp-message")
+async def send_whatsApp_message(
+    session_name: str,
+    api_key: str,
+    message: str,
+    phone: str,
+):
+    """
+    Send bulk WhatsApp messages from CSV file
+    CSV should have 'name' and 'phone' columns
+    """
+        
+    async with WhatsAppClient(session_name=session_name, api_key=api_key) as client:
+        # Check if client is authenticated
+        if not client.authenticated:
+            raise HTTPException(status_code=401, detail="Failed to authenticate WhatsApp client")
+
+
+        try: 
+            success = client.send_message(phone, message)
+            
+            if success:
+                print(f"✅ Successfully sent to {phone}")
+                return True
+            else:
+                
+                print(f"❌ Failed to send to {phone}")
+                return False
+        except:
+            print("can't send")
+
 
 @app.post("/send-bulk")
 async def send_bulk_messages(
