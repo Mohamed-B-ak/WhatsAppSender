@@ -493,9 +493,10 @@ async def send_bulk_messages(
         recipients = []
         for row_num, row in enumerate(csv_reader, start=2):  # Start at 2 (header is line 1)
             try:
-                if 'name' in row and 'phone' in row:
+                if 'name' in row and 'phone' in row and 'company' in row:
                     name = row['name'].strip() if row['name'] else " "
                     phone = row['phone'].strip() if row['phone'] else ""
+                    company = row['company'].strip() if row['company'] else ""
 
                     if phone:
                         # Remove common symbols
@@ -520,9 +521,10 @@ async def send_bulk_messages(
                         else:
                             print(f"✅ Valid Saudi number: {phone}")
                     
-                    if name and phone:
+                    if name and phone and company:
                         # Replace [الاسم] placeholder with actual name
-                        personalized_message = message.replace('[الاسم]', name)
+                        personalized_message_name = message.replace('[الاسم]', name)
+                        personalized_message = personalized_message_name.replace('[الشركة]', company)
                         import random
                         text_list = [
                                     "حيّاك الله",
@@ -567,6 +569,7 @@ async def send_bulk_messages(
                             'message': rtl_message,
                             'name': name
                         })
+                        print(recipients)
                     else:
                         print(f"Skipping row {row_num}: missing name or phone")
             except Exception as e:
