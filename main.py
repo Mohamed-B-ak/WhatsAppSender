@@ -421,6 +421,11 @@ async def get_interface():
 </body>
 </html>
     """
+import re
+
+def digits_only(phone: str) -> str:
+    return re.sub(r"\D", "", phone)
+
 @app.post("/send-whatsApp-message")
 async def send_whatsApp_message(
     session_name: str,
@@ -440,6 +445,7 @@ async def send_whatsApp_message(
 
 
         try: 
+            phone = digits_only(phone)
             success = client.send_message(phone, message)
             
             if success:
