@@ -15,6 +15,10 @@ from pydantic import BaseModel
 import sys
 import os
 
+import asyncio
+
+whatsapp_queue = asyncio.Queue()
+
 # Add the parent directory to path to import the WhatsApp client
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -421,6 +425,46 @@ async def get_interface():
 </body>
 </html>
     """
+
+
+@app.on_event("startup")
+async def start_whatsapp_worker():
+    asyncio.create_task(whatsapp_worker())
+
+async def whatsapp_worker():
+    while True:
+        job = await whatsapp_queue.get()
+
+        try:
+            session_name = job["session_name"]
+            api_key = job["api_key"]
+            phone = job["phone"]
+            message = job["message"]
+
+            async with WhatsAppClient(
+                session_name=session_name,
+                api_key=api_key
+            ) as client:
+
+                if not client.authenticated:
+                    print("❌ Authentication failed in worker")
+                else:
+                    success = client.send_message(phone, message)
+
+                    if success:
+                        print(f"✅ [QUEUE] Sent to {phone}")
+                    else:
+                        print(f"❌ [QUEUE] Failed to send to {phone}")
+
+            # ⏳ Delay to avoid WhatsApp rate-limit
+            await asyncio.sleep(20)
+
+        except Exception as e:
+            print(f"❌ Worker error: {e}")
+
+        finally:
+            whatsapp_queue.task_done()
+
 import re
 
 def digits_only(phone: str) -> str:
@@ -437,35 +481,21 @@ class WhatsAppMessageRequest(BaseModel):
 @app.post("/send-whatsApp-message")
 async def send_whatsApp_message(payload: WhatsAppMessageRequest):
 
-    session_name = payload.session_name
-    api_key = payload.api_key
-    phone = payload.phone
-    message = payload.message
+    phone = digits_only(payload.phone)
+    if not phone:
+        raise HTTPException(status_code=400, detail="Invalid phone number")
 
-    print("Sending message to:", phone)
-    print("Message content:", message)
-    print("Session Name:", session_name)
+    await whatsapp_queue.put({
+        "session_name": payload.session_name,
+        "api_key": payload.api_key,
+        "phone": phone,
+        "message": payload.message
+    })
 
-    async with WhatsAppClient(session_name=session_name, api_key=api_key) as client:
-        if not client.authenticated:
-            raise HTTPException(status_code=401, detail="Failed to authenticate WhatsApp client")
-
-        try:
-            phone = digits_only(phone)
-            if not phone:
-                raise HTTPException(status_code=400, detail="Invalid phone number after cleaning")
-            success = client.send_message(phone, message)
-
-            if success:
-                print(f"✅ Successfully sent to {phone}")
-                return {"status": "sent", "phone": phone}
-            else:
-                print(f"❌ Failed to send to {phone}")
-                return {"status": "failed", "phone": phone}
-
-        except Exception as e:
-            print("❌ Error:", e)
-            raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "status": "queued",
+        "phone": phone
+    }
 
 
 @app.post("/send-bulk")
