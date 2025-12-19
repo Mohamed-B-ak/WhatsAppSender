@@ -144,7 +144,7 @@ class WhatsAppClient:
                 f"{self.server_url}/api/{self.session_name}/send-message",
                 json=payload,
                 headers=headers,
-                timeout=30
+                timeout=90
             )
             print(resp)
             if resp.status_code in [200, 201]:
