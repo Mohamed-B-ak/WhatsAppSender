@@ -436,6 +436,8 @@ async def whatsapp_worker():
         job = await whatsapp_queue.get()
 
         try:
+            # ⏳ Delay to avoid WhatsApp rate-limit
+            await asyncio.sleep(20)
             session_name = job["session_name"]
             api_key = job["api_key"]
             phone = job["phone"]
@@ -456,8 +458,7 @@ async def whatsapp_worker():
                     else:
                         print(f"❌ [QUEUE] Failed to send to {phone}")
 
-            # ⏳ Delay to avoid WhatsApp rate-limit
-            await asyncio.sleep(20)
+            
 
         except Exception as e:
             print(f"❌ Worker error: {e}")
