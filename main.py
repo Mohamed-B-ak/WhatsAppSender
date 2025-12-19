@@ -437,7 +437,7 @@ async def whatsapp_worker():
 
         try:
             # ⏳ Delay to avoid WhatsApp rate-limit
-            await asyncio.sleep(20)
+            await asyncio.sleep(45)
             session_name = job["session_name"]
             api_key = job["api_key"]
             phone = job["phone"]
