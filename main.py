@@ -426,37 +426,46 @@ import re
 def digits_only(phone: str) -> str:
     return re.sub(r"\D", "", phone)
 
+from pydantic import BaseModel
+
+class WhatsAppMessageRequest(BaseModel):
+    session_name: str
+    api_key: str
+    phone: str
+    message: str
+
 @app.post("/send-whatsApp-message")
-async def send_whatsApp_message(
-    session_name: str,
-    api_key: str,
-    message: str,
-    phone: str,
-):
-    """
-    Send bulk WhatsApp messages from CSV file
-    CSV should have 'name' and 'phone' columns
-    """
-        
+async def send_whatsApp_message(payload: WhatsAppMessageRequest):
+
+    session_name = payload.session_name
+    api_key = payload.api_key
+    phone = payload.phone
+    message = payload.message
+
+    print("Sending message to:", phone)
+    print("Message content:", message)
+    print("Session Name:", session_name)
+
     async with WhatsAppClient(session_name=session_name, api_key=api_key) as client:
-        # Check if client is authenticated
         if not client.authenticated:
             raise HTTPException(status_code=401, detail="Failed to authenticate WhatsApp client")
 
-
-        try: 
+        try:
             phone = digits_only(phone)
+            if not phone:
+                raise HTTPException(status_code=400, detail="Invalid phone number after cleaning")
             success = client.send_message(phone, message)
-            
+
             if success:
                 print(f"✅ Successfully sent to {phone}")
-                return True
+                return {"status": "sent", "phone": phone}
             else:
-                
                 print(f"❌ Failed to send to {phone}")
-                return False
-        except:
-            print("can't send")
+                return {"status": "failed", "phone": phone}
+
+        except Exception as e:
+            print("❌ Error:", e)
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/send-bulk")

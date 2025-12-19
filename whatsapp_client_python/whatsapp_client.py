@@ -146,7 +146,7 @@ class WhatsAppClient:
                 headers=headers,
                 timeout=30
             )
-
+            print(resp)
             if resp.status_code in [200, 201]:
                 print(f"✅ Message sent successfully to {phone}")
                 return True
