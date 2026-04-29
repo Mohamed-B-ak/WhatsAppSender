@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import csv
 import io
-from typing import List, Dict
+from typing import List, Dict, Tuple
 import smtplib
 import pandas as pd
 from email.mime.text import MIMEText
@@ -15,14 +15,85 @@ from pydantic import BaseModel
 import sys
 import os
 
-import asyncio
+import httpx  # NEW: async HTTP client for wasenderapi.com
+import uuid
+import random
+from datetime import datetime, timezone
+from collections import OrderedDict
 
 whatsapp_queue = asyncio.Queue()
 
-# Add the parent directory to path to import the WhatsApp client
+# Per-batch results so the UI can poll progress while the worker drains the queue.
+# OrderedDict lets us evict the oldest batch when we exceed MAX_BATCHES.
+MAX_BATCHES = 100
+batch_results: "OrderedDict[str, dict]" = OrderedDict()
+
+# Random per-message delay window (seconds) — 2 to 3 minutes
+MIN_DELAY_SECONDS = 120
+MAX_DELAY_SECONDS = 180
+
+
+def _evict_old_batches():
+    """Drop oldest batches if we're over the cap."""
+    while len(batch_results) > MAX_BATCHES:
+        batch_results.popitem(last=False)
+
+# Add the parent directory to path (kept for any other local imports you may add later)
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from whatsapp_client_python.whatsapp_client import WhatsAppClient
+# -----------------------------------------------------------------------------
+# wasenderapi.com integration
+# -----------------------------------------------------------------------------
+WASENDER_API_URL = "https://wasenderapi.com/api/send-message"
+WASENDER_TIMEOUT = 30.0  # seconds
+
+
+async def send_whatsapp_via_wasender(
+    api_key: str,
+    phone: str,
+    text: str,
+    http_client: httpx.AsyncClient,
+) -> Tuple[bool, str]:
+    """
+    Send a single WhatsApp message via wasenderapi.com.
+
+    Returns (success, info). On failure, `info` contains the error message
+    (HTTP status + body, or exception message).
+    """
+    # The API expects E.164 format with a leading '+'.
+    # Our CSV normalization strips '+', so re-add it here.
+    to = phone if phone.startswith("+") else f"+{phone}"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {"to": to, "text": text}
+
+    try:
+        response = await http_client.post(
+            WASENDER_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=WASENDER_TIMEOUT,
+        )
+    except httpx.TimeoutException:
+        return False, "request timed out"
+    except httpx.RequestError as e:
+        return False, f"request error: {e}"
+
+    if 200 <= response.status_code < 300:
+        return True, f"HTTP {response.status_code}"
+
+    # Try to extract a useful error message from the response body
+    try:
+        body = response.json()
+        err_msg = body.get("message") or body.get("error") or str(body)
+    except Exception:
+        err_msg = response.text or "<empty body>"
+
+    return False, f"HTTP {response.status_code}: {err_msg}"
+
 
 app = FastAPI(title="WhatsApp Bulk Messaging System")
 
@@ -35,11 +106,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 class BulkMessageRequest(BaseModel):
-    session_name: str
     api_key: str
     message: str
     recipients: List[Dict[str, str]]
+
 
 # HTML Interface
 @app.get("/", response_class=HTMLResponse)
@@ -302,13 +374,8 @@ async def get_interface():
         
         <form id="bulkForm">
             <div class="form-group">
-                <label for="session_name">اسم الجلسة (Session Name)</label>
-                <input type="text" id="session_name" name="session_name" required placeholder="أدخل اسم الجلسة">
-            </div>
-            
-            <div class="form-group">
-                <label for="api_key">مفتاح API (API Key)</label>
-                <input type="text" id="api_key" name="api_key" required placeholder="أدخل مفتاح API">
+                <label for="api_key">مفتاح API (Wasender Bearer Token)</label>
+                <input type="text" id="api_key" name="api_key" required placeholder="أدخل Bearer Token من wasenderapi.com">
             </div>
             
             <div class="form-group">
@@ -368,7 +435,6 @@ async def get_interface():
             e.preventDefault();
             
             const formData = new FormData();
-            formData.append('session_name', document.getElementById('session_name').value);
             formData.append('api_key', document.getElementById('api_key').value);
             formData.append('message', document.getElementById('message').value);
             formData.append('file', fileInput.files[0]);
@@ -376,6 +442,7 @@ async def get_interface():
             sendBtn.disabled = true;
             progress.classList.add('active');
             result.style.display = 'none';
+            progressText.textContent = '⏳ جاري رفع القائمة وإضافتها للطابور...';
             
             try {
                 const response = await fetch('/send-bulk', {
@@ -385,40 +452,79 @@ async def get_interface():
                 
                 const data = await response.json();
                 
-                if (response.ok) {
-                    result.className = 'result success';
-                    result.innerHTML = `
-                        <div style="font-size: 18px; margin-bottom: 15px;">✅ تمت العملية بنجاح!</div>
-                        <div class="stats">
-                            <div class="stat">
-                                <div class="stat-number">${data.sent}</div>
-                                <div class="stat-label">رسائل مرسلة</div>
-                            </div>
-                            <div class="stat">
-                                <div class="stat-number">${data.failed}</div>
-                                <div class="stat-label">رسائل فاشلة</div>
-                            </div>
-                            <div class="stat">
-                                <div class="stat-number">${data.total}</div>
-                                <div class="stat-label">المجموع</div>
-                            </div>
-                        </div>
-                        <details style="margin-top: 15px;">
-                            <summary style="cursor: pointer; color: #667eea;">عرض التفاصيل</summary>
-                            <pre style="margin-top: 10px; font-size: 12px; max-height: 200px; overflow-y: auto;">${JSON.stringify(data.details, null, 2)}</pre>
-                        </details>
-                    `;
-                } else {
+                if (!response.ok) {
                     result.className = 'result error';
                     result.innerHTML = `❌ خطأ: ${data.detail || 'حدث خطأ في الإرسال'}`;
+                    result.style.display = 'block';
+                    sendBtn.disabled = false;
+                    progress.classList.remove('active');
+                    return;
                 }
+
+                // Batch is queued. Now poll /queue-status/{batch_id} every 5s.
+                const batchId = data.batch_id;
+                const total = data.total;
+                progressText.innerHTML = `📋 تم إضافة <b>${total}</b> رسالة للطابور.<br>` +
+                    `⏱️ الوقت المتوقع: ${data.estimated_minutes_min}-${data.estimated_minutes_max} دقيقة<br>` +
+                    `<small>كل رسالة تنتظر 2-3 دقائق قبل الإرسال</small>`;
+
+                const pollInterval = 5000; // 5 seconds
+                const poll = async () => {
+                    try {
+                        const r = await fetch(`/queue-status/${batchId}`);
+                        if (!r.ok) {
+                            progressText.textContent = '⚠️ تعذر جلب حالة الطابور';
+                            return;
+                        }
+                        const s = await r.json();
+                        const done = s.sent + s.failed;
+                        const pct = s.total ? Math.round((done / s.total) * 100) : 0;
+                        progressText.innerHTML =
+                            `📊 التقدم: <b>${done}/${s.total}</b> (${pct}%)<br>` +
+                            `✅ مرسل: ${s.sent} &nbsp;&nbsp; ❌ فشل: ${s.failed} &nbsp;&nbsp; ⏳ متبقي: ${s.pending}`;
+
+                        if (s.status === 'completed') {
+                            progress.classList.remove('active');
+                            result.className = 'result success';
+                            result.innerHTML = `
+                                <div style="font-size: 18px; margin-bottom: 15px;">✅ اكتملت العملية!</div>
+                                <div class="stats">
+                                    <div class="stat">
+                                        <div class="stat-number">${s.sent}</div>
+                                        <div class="stat-label">رسائل مرسلة</div>
+                                    </div>
+                                    <div class="stat">
+                                        <div class="stat-number">${s.failed}</div>
+                                        <div class="stat-label">رسائل فاشلة</div>
+                                    </div>
+                                    <div class="stat">
+                                        <div class="stat-number">${s.total}</div>
+                                        <div class="stat-label">المجموع</div>
+                                    </div>
+                                </div>
+                                <details style="margin-top: 15px;">
+                                    <summary style="cursor: pointer; color: #667eea;">عرض التفاصيل</summary>
+                                    <pre style="margin-top: 10px; font-size: 12px; max-height: 200px; overflow-y: auto;">${JSON.stringify(s.details, null, 2)}</pre>
+                                </details>
+                            `;
+                            result.style.display = 'block';
+                            sendBtn.disabled = false;
+                            return;
+                        }
+                        setTimeout(poll, pollInterval);
+                    } catch (err) {
+                        progressText.textContent = `⚠️ خطأ في الاستعلام: ${err.message}`;
+                        setTimeout(poll, pollInterval);
+                    }
+                };
+                setTimeout(poll, pollInterval);
+
             } catch (error) {
                 result.className = 'result error';
                 result.innerHTML = `❌ خطأ في الاتصال: ${error.message}`;
-            } finally {
+                result.style.display = 'block';
                 sendBtn.disabled = false;
                 progress.classList.remove('active');
-                result.style.display = 'block';
             }
         });
     </script>
@@ -431,53 +537,101 @@ async def get_interface():
 async def start_whatsapp_worker():
     asyncio.create_task(whatsapp_worker())
 
+
 async def whatsapp_worker():
-    while True:
-        job = await whatsapp_queue.get()
+    """
+    Background worker that drains whatsapp_queue and sends messages
+    via wasenderapi.com. Sleeps a random 2-3 minutes BEFORE each send
+    to look human. Reuses one httpx.AsyncClient for the worker lifetime.
 
-        try:
-            # ⏳ Delay to avoid WhatsApp rate-limit
-            await asyncio.sleep(45)
-            session_name = job["session_name"]
-            api_key = job["api_key"]
-            phone = job["phone"]
-            message = job["message"]
+    Job shape:
+        {
+            "api_key":   str,
+            "phone":     str,
+            "message":   str,
+            "name":      str (optional),
+            "batch_id":  str (optional, for /send-bulk progress tracking),
+        }
+    """
+    async with httpx.AsyncClient() as http_client:
+        while True:
+            job = await whatsapp_queue.get()
+            try:
+                api_key = job["api_key"]
+                phone = job["phone"]
+                message = job["message"]
+                name = job.get("name", "")
+                batch_id = job.get("batch_id")
 
-            async with WhatsAppClient(
-                session_name=session_name,
-                api_key=api_key
-            ) as client:
+                # ⏳ Random delay BEFORE sending, to look human and avoid rate-limits
+                delay = random.uniform(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
+                print(f"⏳ Worker sleeping {delay:.1f}s before sending to {phone}")
+                await asyncio.sleep(delay)
 
-                if not client.authenticated:
-                    print("❌ Authentication failed in worker")
+                success, info = await send_whatsapp_via_wasender(
+                    api_key=api_key,
+                    phone=phone,
+                    text=message,
+                    http_client=http_client,
+                )
+
+                if success:
+                    print(f"✅ [QUEUE] Sent to {phone} ({info})")
                 else:
-                    success = client.send_message(phone, message)
+                    print(f"❌ [QUEUE] Failed to send to {phone}: {info}")
 
+                # Update batch progress if this job belongs to a bulk batch
+                if batch_id and batch_id in batch_results:
+                    b = batch_results[batch_id]
                     if success:
-                        print(f"✅ [QUEUE] Sent to {phone}")
+                        b["sent"] += 1
+                        b["details"].append({
+                            "phone": phone, "name": name, "status": "✅ sent",
+                        })
                     else:
-                        print(f"❌ [QUEUE] Failed to send to {phone}")
+                        b["failed"] += 1
+                        b["details"].append({
+                            "phone": phone, "name": name,
+                            "status": "❌ failed", "error": info,
+                        })
+                    b["pending"] -= 1
+                    if b["pending"] <= 0:
+                        b["status"] = "completed"
+                        b["completed_at"] = datetime.now(timezone.utc).isoformat()
 
-            
+            except Exception as e:
+                print(f"❌ Worker error: {e}")
+                # Still mark the job as resolved on the batch so pending doesn't stick
+                bid = job.get("batch_id") if isinstance(job, dict) else None
+                if bid and bid in batch_results:
+                    b = batch_results[bid]
+                    b["failed"] += 1
+                    b["pending"] -= 1
+                    b["details"].append({
+                        "phone": job.get("phone", "?"),
+                        "name": job.get("name", ""),
+                        "status": "❌ error",
+                        "error": str(e),
+                    })
+                    if b["pending"] <= 0:
+                        b["status"] = "completed"
+                        b["completed_at"] = datetime.now(timezone.utc).isoformat()
+            finally:
+                whatsapp_queue.task_done()
 
-        except Exception as e:
-            print(f"❌ Worker error: {e}")
-
-        finally:
-            whatsapp_queue.task_done()
 
 import re
+
 
 def digits_only(phone: str) -> str:
     return re.sub(r"\D", "", phone)
 
-from pydantic import BaseModel
 
 class WhatsAppMessageRequest(BaseModel):
-    session_name: str
     api_key: str
     phone: str
     message: str
+
 
 @app.post("/send-whatsApp-message")
 async def send_whatsApp_message(payload: WhatsAppMessageRequest):
@@ -487,27 +641,25 @@ async def send_whatsApp_message(payload: WhatsAppMessageRequest):
         raise HTTPException(status_code=400, detail="Invalid phone number")
 
     await whatsapp_queue.put({
-        "session_name": payload.session_name,
         "api_key": payload.api_key,
         "phone": phone,
-        "message": payload.message
+        "message": payload.message,
     })
 
     return {
         "status": "queued",
-        "phone": phone
+        "phone": phone,
     }
 
 
 @app.post("/send-bulk")
 async def send_bulk_messages(
-    session_name: str = Form(...),
     api_key: str = Form(...),
     message: str = Form(...),
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
 ):
     """
-    Send bulk WhatsApp messages from CSV file
+    Send bulk WhatsApp messages from CSV file via wasenderapi.com
     CSV should have 'name' and 'phone' columns
     """
     try:
@@ -539,10 +691,9 @@ async def send_bulk_messages(
         recipients = []
         for row_num, row in enumerate(csv_reader, start=2):  # Start at 2 (header is line 1)
             try:
-                if 'name' in row and 'phone' in row and 'company' in row:
+                if 'name' in row and 'phone' in row:
                     name = row['name'].strip() if row['name'] else " "
                     phone = row['phone'].strip() if row['phone'] else ""
-                    company = row['company'].strip() if row['company'] else ""
 
                     if phone:
                         # Remove common symbols
@@ -567,53 +718,52 @@ async def send_bulk_messages(
                         else:
                             print(f"✅ Valid Saudi number: {phone}")
                     
-                    if name and phone and company:
+                    if name and phone:
                         # Replace [الاسم] placeholder with actual name
-                        personalized_message_name = message.replace('[الاسم]', name)
-                        personalized_message = personalized_message_name.replace('[الشركة]', company)
-                        import random
+                        personalized_message = message.replace('[الاسم]', name)
                         text_list = [
-                                    "حيّاك الله",
-                                    "السلام عليكم و رحمة الله و بركاته",
-                                    "يسعد أوقاتك",
-                                    "تحية طيبة",
-                                    "يعطيك العافية",
-                                    "يسعد أيامك",
-                                    "حيّاك الله",
-                                    "يا هلا",
-                                    "أهلًا",
-                                    "السلام عليكم"
-                                ]
-                        name_list = ["نور",
-                                    "سارة",
-                                    "ريم",
-                                    "هدى",
-                                    "فاطمة",
-                                    "مريم",
-                                    "جواهر",
-                                    "شهد",
-                                    "دلال",
-                                    "نورة",
-                                    "أروى",
-                                    "ضحى",
-                                    "رغد",
-                                    "سمية",
-                                    "لمى",
-                                    "غادة",
-                                    "جنان",
-                                    "ليان",
-                                    "سلمى",
-                                    "زينب"]
+                            "حيّاك الله",
+                            "السلام عليكم و رحمة الله و بركاته",
+                            "يسعد أوقاتك",
+                            "تحية طيبة",
+                            "يعطيك العافية",
+                            "يسعد أيامك",
+                            "حيّاك الله",
+                            "يا هلا",
+                            "أهلًا",
+                            "السلام عليكم",
+                        ]
+                        name_list = [
+                            "نور",
+                            "سارة",
+                            "ريم",
+                            "هدى",
+                            "فاطمة",
+                            "مريم",
+                            "جواهر",
+                            "شهد",
+                            "دلال",
+                            "نورة",
+                            "أروى",
+                            "ضحى",
+                            "رغد",
+                            "سمية",
+                            "لمى",
+                            "غادة",
+                            "جنان",
+                            "ليان",
+                            "سلمى",
+                            "زينب"]
 
                         random_text = random.choice(text_list)
-                        version1 = personalized_message.replace('[التحية]', random_text)
-                        random_name = random.choice(name_list)
-                        final_personalized_message = version1.replace('[فريق]', random_name)
+                        final_personalized_message1 = personalized_message.replace('[التحية]', random_text)
+                        random_text2 = random.choice(name_list)
+                        final_personalized_message = final_personalized_message1.replace('[الفريق]', random_text2)
                         rtl_message = f"\u202B{final_personalized_message}\u202C"
                         recipients.append({
                             'phone': phone,
                             'message': rtl_message,
-                            'name': name
+                            'name': name,
                         })
                         print(recipients)
                     else:
@@ -623,88 +773,93 @@ async def send_bulk_messages(
                 continue
         
         if not recipients:
-            raise HTTPException(status_code=400, detail="No valid recipients found in CSV. Make sure CSV has 'name' and 'phone' columns with data.")
+            raise HTTPException(
+                status_code=400,
+                detail="No valid recipients found in CSV. Make sure CSV has 'name' and 'phone' columns with data.",
+            )
         
-        # Initialize WhatsApp client and send messages
-        results = {
+        # ---------------------------------------------------------------
+        # Enqueue all messages for the worker to drain at 2-3 min intervals.
+        # We DO NOT send synchronously here — the request returns immediately
+        # with a batch_id the UI can poll via /queue-status/{batch_id}.
+        # ---------------------------------------------------------------
+        batch_id = uuid.uuid4().hex
+        total = len(recipients)
+
+        batch_results[batch_id] = {
+            "batch_id": batch_id,
+            "status": "queued",
+            "total": total,
             "sent": 0,
             "failed": 0,
-            "total": len(recipients),
-            "details": []
+            "pending": total,
+            "details": [],
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": None,
+            # Each message waits 2-3 min, so worst-case ETA ≈ total * 3 min
+            "estimated_minutes_min": round(total * MIN_DELAY_SECONDS / 60),
+            "estimated_minutes_max": round(total * MAX_DELAY_SECONDS / 60),
         }
-        
-        print(f"Starting to send {len(recipients)} messages...")
-        
-        async with WhatsAppClient(session_name=session_name, api_key=api_key) as client:
-            # Check if client is authenticated
-            if not client.authenticated:
-                raise HTTPException(status_code=401, detail="Failed to authenticate WhatsApp client")
-            
-            for idx, recipient in enumerate(recipients, 1):
-                try:
-                    print(f"Sending message {idx}/{len(recipients)} to {recipient['phone']} ({recipient['name']})")
-                    
-                    # Using synchronous send_message as per the client implementation
-                    try: 
-                        success = client.send_message(recipient['phone'], recipient['message'])
-                        
-                        if success:
-                            results["sent"] += 1
-                            results["details"].append({
-                                "phone": recipient['phone'],
-                                "name": recipient['name'],
-                                "status": "✅ sent"
-                            })
-                            print(f"✅ Successfully sent to {recipient['phone']}")
-                        else:
-                            results["failed"] += 1
-                            results["details"].append({
-                                "phone": recipient['phone'],
-                                "name": recipient['name'],
-                                "status": "❌ failed"
-                            })
-                            print(f"❌ Failed to send to {recipient['phone']}")
-                    except:
-                        print("can't send")
-                    
-                    # Add delay between messages to avoid rate limiting
-                    if idx < len(recipients):  # Don't delay after the last message
-                        await asyncio.sleep(2)
-                    
-                except Exception as e:
-                    print(f"Error sending to {recipient['phone']}: {str(e)}")
-                    results["failed"] += 1
-                    results["details"].append({
-                        "phone": recipient['phone'],
-                        "name": recipient['name'],
-                        "status": "❌ error",
-                        "error": str(e)
-                    })
-        
-        print(f"Completed: {results['sent']} sent, {results['failed']} failed")
-        return JSONResponse(content=results)
-        
+        _evict_old_batches()
+
+        for recipient in recipients:
+            await whatsapp_queue.put({
+                "api_key": api_key,
+                "phone": recipient["phone"],
+                "message": recipient["message"],
+                "name": recipient["name"],
+                "batch_id": batch_id,
+            })
+
+        print(
+            f"Queued {total} messages as batch {batch_id} "
+            f"(ETA {batch_results[batch_id]['estimated_minutes_min']}-"
+            f"{batch_results[batch_id]['estimated_minutes_max']} min)"
+        )
+
+        return JSONResponse(content={
+            "batch_id": batch_id,
+            "status": "queued",
+            "queued": total,
+            "total": total,
+            "estimated_minutes_min": batch_results[batch_id]["estimated_minutes_min"],
+            "estimated_minutes_max": batch_results[batch_id]["estimated_minutes_max"],
+            "poll_url": f"/queue-status/{batch_id}",
+        })
+
     except HTTPException:
         raise
     except Exception as e:
         print(f"Error in send_bulk_messages: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get("/queue-status/{batch_id}")
+async def queue_status(batch_id: str):
+    """Poll progress of a /send-bulk batch."""
+    b = batch_results.get(batch_id)
+    if not b:
+        raise HTTPException(status_code=404, detail="Unknown batch_id")
+    return JSONResponse(content=b)
+
+
 from fastapi import FastAPI, Body, Form
 from typing import Optional
+
+
 @app.post("/sendwhatsApp")
-async def send_bulk_messages(
-    session_name: Optional[str] = Body(None),
+async def send_bulk_messages_debug(
     api_key: Optional[str] = Body(None),
     message: Optional[str] = Body(None),
     number: Optional[str] = Body(None),
 ):
-    print("session_name:", session_name)
     print("api_key:", api_key)
     print("message:", message)
     print("number:", number)
 
     return {"status": "ok"}
+
+
 # -------------------------------
 # ✉️ EMAIL INTERFACE
 # -------------------------------
@@ -796,6 +951,7 @@ async def get_email_interface():
     </html>
     """
 
+
 # -------------------------------
 # ✉️ EMAIL ENDPOINT
 # -------------------------------
@@ -805,7 +961,7 @@ async def send_bulk_emails(
     app_password: str = Form(...),
     subject: str = Form(...),
     body: str = Form(...),
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
 ):
     """
     Send personalized bulk emails from a CSV file.
@@ -862,13 +1018,15 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "WhatsApp Bulk Messaging System"}
 
+
 @app.get("/test")
 async def test_endpoint():
     """Test endpoint to verify server is running"""
     return {"message": "Server is running!", "status": "OK"}
 
+
 if __name__ == "__main__":
     import uvicorn
     print("Starting WhatsApp Bulk Messaging System...")
-    print("Access the interface at: http://localhost:8000")
+    print("Access the interface at: http://localhost:8002")
     uvicorn.run(app, host="0.0.0.0", port=8002)
