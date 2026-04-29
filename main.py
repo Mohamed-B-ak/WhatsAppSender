@@ -29,8 +29,8 @@ MAX_BATCHES = 100
 batch_results: "OrderedDict[str, dict]" = OrderedDict()
 
 # Random per-message delay window (seconds) — 2 to 3 minutes
-MIN_DELAY_SECONDS = 120
-MAX_DELAY_SECONDS = 180
+MIN_DELAY_SECONDS = 1200
+MAX_DELAY_SECONDS = 1800
 
 
 def _evict_old_batches():
