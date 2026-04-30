@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import csv
 import io
+import json
 import re
 import random
 from typing import List, Dict
@@ -43,33 +44,32 @@ def digits_only(phone: str) -> str:
     return re.sub(r"\D", "", phone)
 
 
-def normalize_saudi_phone(raw: str) -> str | None:
+def normalize_phone(raw: str) -> str | None:
     """
-    Normalize a phone number string to the 12-digit Saudi format `966XXXXXXXXX`.
-    Returns None if the result isn't a valid 12-digit Saudi number.
+    Normalize any phone number to a clean digits-only string.
 
-    Rules (preserved from the original implementation):
-      - strip spaces, dashes, '+'
-      - drop leading '00966'
-      - drop a single leading '0'
-      - if it doesn't start with '966', prepend '966'
-      - must be exactly 12 digits
+    Rules:
+      - strip '+', spaces, dashes, and every other non-digit
+      - drop a leading '00' international prefix if present
+      - return None if the result isn't between 8 and 15 digits (E.164 range)
+
+    Examples:
+      '+966 50 000 0001'  -> '966500000001'
+      '00966500000001'     -> '966500000001'
+      '+216 20 123 456'   -> '21620123456'
+      '50 123 456'         -> '50123456'
+      'abc'                -> None
     """
     if not raw:
         return None
 
-    phone = raw.strip().replace(" ", "").replace("-", "").replace("+", "")
+    digits = re.sub(r"\D", "", raw)
+    if digits.startswith("00"):
+        digits = digits[2:]
 
-    if phone.startswith("00966"):
-        phone = phone[5:]
-    if phone.startswith("0"):
-        phone = phone[1:]
-    if not phone.startswith("966"):
-        phone = "966" + phone
-
-    if len(phone) != 12 or not phone.isdigit():
+    if not (8 <= len(digits) <= 15):
         return None
-    return phone
+    return digits
 
 
 # Pools used to vary [التحية] (greeting) and [الفريق] (team/agent name) per row,
@@ -94,19 +94,51 @@ _TEAM_NAME_POOL = [
 
 def personalize_message(template: str, name: str) -> str:
     """
-    Substitute personalization placeholders and wrap result in RTL markers
-    so it renders correctly on Arabic clients.
+    Substitute personalization placeholders.
 
     Placeholders:
       [الاسم]   -> recipient name
       [التحية] -> random greeting from _GREETING_POOL
       [الفريق] -> random name from _TEAM_NAME_POOL
+
+    The result is the plain personalized string (no RTL embedding marks).
+    WhatsApp clients render Arabic right-to-left automatically based on the
+    text content — adding U+202B/U+202C wrappers tends to confuse downstream
+    JSON template engines and strict API validators with no visible benefit.
     """
     msg = template.replace("[الاسم]", name)
     msg = msg.replace("[التحية]", random.choice(_GREETING_POOL))
     msg = msg.replace("[الفريق]", random.choice(_TEAM_NAME_POOL))
-    # \u202B = RTL embedding, \u202C = pop directional formatting
-    return f"\u202B{msg}\u202C"
+    return msg
+
+
+def escape_for_template_substitution(text: str) -> str:
+    """
+    Pre-encode a string so it survives a downstream "naive" JSON-body
+    template engine — the kind that drops `{{variable}}` into a JSON
+    template as raw text, without JSON-escaping it.
+
+    Activepieces (especially older versions like v0.9.5) and several other
+    no-code platforms behave this way. With raw substitution, any real
+    newline / tab / `"` / `\\` in the message turns the resulting body into
+    invalid JSON, the receiving API silently fails to parse it, and you
+    get back validation errors like "the to field is required" — even
+    though the body looks fine in the dashboard.
+
+    What we do here:
+        json.dumps("hello\\nmohamed1")[1:-1]  ->  "hello\\\\nmohamed1"
+
+    i.e. a real newline becomes the two-character sequence backslash+'n'.
+    After the downstream engine drops this string into its template, the
+    final body contains a valid `\\n` JSON escape that the receiving API
+    decodes back into a real newline. Same idea for tabs, quotes, etc.
+
+    Trade-off: if your webhook receiver does proper JSON-aware escaping
+    during substitution (a "smart" engine), this pre-escape will be applied
+    twice and recipients will see literal `\\n` text in their messages.
+    In that case, change the call site in /send-bulk to skip this helper.
+    """
+    return json.dumps(text, ensure_ascii=False)[1:-1]
 
 
 # -----------------------------------------------------------------------------
@@ -499,7 +531,7 @@ async def send_bulk_messages(
         try:
             name = (row.get("name") or "").strip()
             raw_phone = (row.get("phone") or "").strip()
-            phone = normalize_saudi_phone(raw_phone) if raw_phone else None
+            phone = normalize_phone(raw_phone) if raw_phone else None
 
             if not name or not phone:
                 skipped.append({
@@ -512,7 +544,9 @@ async def send_bulk_messages(
 
             payload.append({
                 "phone": phone,
-                "message": personalize_message(message, name),
+                "message": escape_for_template_substitution(
+                    personalize_message(message, name)
+                ),
             })
         except Exception as e:
             skipped.append({

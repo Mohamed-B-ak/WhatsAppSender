@@ -42,16 +42,24 @@ def normalize_phone(raw: str) -> str:
 
 
 def build_payload(recipients_list, template):
-    """Return [{phone, message}, ...] ready to POST to the webhook."""
+    """Return [{phone, message}, ...] ready to POST to the webhook.
+
+    Messages are pre-escaped so they survive a "naive" downstream JSON-body
+    template engine (e.g. older Activepieces) that drops `{{variable}}` into
+    a JSON template without escaping. See main.py for the full rationale.
+    """
     payload = []
     for r in recipients_list:
         name = (r.get("name") or "").strip()
         phone = normalize_phone(r.get("phone", ""))
         if not name or not phone:
             continue
+        rendered = template.replace("[الاسم]", name)
+        # Pre-escape: real newline -> '\n', real '"' -> '\"', etc.
+        safe_message = json.dumps(rendered, ensure_ascii=False)[1:-1]
         payload.append({
             "phone": phone,
-            "message": template.replace("[الاسم]", name),
+            "message": safe_message,
         })
     return payload
 
